@@ -7,4 +7,3 @@
 > https://ahoi-attacks.github.io/sigy/
 >
 
-_Source code coming soon, stay tuned!_
