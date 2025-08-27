@@ -1,0 +1,137 @@
+index 9c24a3707..925b401ee 100644
+--- a/tests/sgx/td_state/enc/enc.c
++++ b/tests/sgx/td_state/enc/enc.c
+@@ -14,6 +14,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+
++static int signal_handled = 0;
+ typedef struct _thread_info_t
+ {
+     int tid;
+@@ -108,6 +109,7 @@ static uint64_t td_state_handler(oe_exception_record_t* exception_record)
+
+         host_get_tid(&self_tid);
+         OE_TEST(_thread_info.tid == self_tid);
++            signal_handled = 1;
+
+         printf("(tid=%d) thread is interrupted...\n", self_tid);
+
+@@ -231,31 +233,6 @@ void enc_run_thread(int tid)
+
+     __atomic_store_n(_host_lock_state, 3, __ATOMIC_RELEASE);
+
+-    // Make a ocall to spin and wait for an interrupt on the host
+-    host_spin();
+-
+-    while (__atomic_load_n(_host_lock_state, __ATOMIC_ACQUIRE) != 5)
+-    {
+-        asm volatile("pause" ::: "memory");
+-    }
+-
+-    // Expect the state to be RUNNING after an OCALL
+-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
+-
+-    {
+-        uint32_t a, b, c, d;
+-        cpuid(1, 0, &a, &b, &c, &d);
+-    }
+-
+-    // Expect the state to be persisted after an illegal instruction
+-    // emulation
+-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
+-
+-    divide_by_zero_exception_function();
+-
+-    // Expect the state to be persisted after an exception.
+-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_RUNNING);
+-
+     OE_CHECK(oe_remove_vectored_exception_handler(td_state_handler));
+
+     printf("(tid=%d) thread is exiting...\n", self_tid);
+@@ -302,29 +279,7 @@ void enc_td_state(uint64_t lock_state)
+         (uint64_t)_thread_info.td,
+         _thread_info.tid);
+
+-    host_send_interrupt(_thread_info.tid, SIGUSR1);
+-
+-    while (__atomic_load_n(_host_lock_state, __ATOMIC_ACQUIRE) != 4)
+-    {
+-        asm volatile("pause" ::: "memory");
+-    }
+-
+-    // Expect the target td's state to be EXITED while
+-    // running in the host context
+-    OE_EXPECT(_thread_info.td->state, OE_TD_STATE_EXITED);
+-
+-    host_sleep_msec(30);
+-
+-    printf(
+-        "(tid=%d) Sending interrupt to (td=0x%lx, tid=%d) on the "
+-        "host...\n",
+-        tid,
+-        (uint64_t)_thread_info.td,
+-        _thread_info.tid);
+-
+-    // Expect the host execution to be interrupted by SIGUSR1
+-    host_send_interrupt(_thread_info.tid, SIGUSR1);
+-
++    while(!signal_handled){}
+     host_join_thread();
+
+     // Expect the target td's state to be EXITED
+diff --git a/tests/sgx/td_state/host/host.c b/tests/sgx/td_state/host/host.c
+index cc2abfb50..f75932c64 100644
+--- a/tests/sgx/td_state/host/host.c
++++ b/tests/sgx/td_state/host/host.c
+@@ -28,22 +28,18 @@ int host_get_tid()
+
+ void host_spin()
+ {
+-    int return_value;
+-    int tid = host_get_tid();
+-
+-    printf("(tid=%d) thread is spinning on the host...\n", tid);
+-
+-    _lock_state = 4;
+-    return_value = poll(NULL, 0, -1);
+-    // Expect to be interrupted and return -1
+-    OE_TEST(return_value == -1);
+-    printf("(tid=%d) thread is interrupted on the host...\n", tid);
+-    _lock_state = 5;
++    // int return_value;
++    int tid = host_get_tid() + 1;
++    pid_t pid = getpid();
++    int signal_number = 10;
++    printf("Sending interrupt to pid %d tid %d with signal number %d \n", pid, tid, signal_number);
++    syscall(SYS_tgkill, pid, tid, signal_number);
+ }
+
+ void host_send_interrupt(int tid, int signal_number)
+ {
+     pid_t pid = getpid();
++    printf("Sending interrupt to pid %d tid %d with signal number %d \n", pid, tid, signal_number);
+     syscall(SYS_tgkill, pid, tid, signal_number);
+ }
+
+@@ -133,7 +129,7 @@ int main(int argc, const char* argv[])
+                "(td_state)\n");
+         return SKIP_RETURN_CODE;
+     }
+-
++    printf("=== creating encalave %s \n", argv[1]);
+     if ((result = oe_create_td_state_enclave(
+              argv[1], OE_ENCLAVE_TYPE_SGX, flags, NULL, 0, &enclave)) != OE_OK)
+         oe_put_err("oe_create_enclave(): result=%u", result);
+@@ -144,12 +140,6 @@ int main(int argc, const char* argv[])
+     if (result != OE_OK)
+         oe_put_err("oe_call_enclave() failed: result=%u", result);
+
+-    printf("=== test the handler no return\n");
+-
+-    result = enc_td_state_handler_no_return(enclave);
+-    if (result != OE_OK)
+-        oe_put_err("oe_call_enclave() failed: result=%u", result);
+-
+     result = oe_terminate_enclave(enclave);
+     OE_TEST(result == OE_OK);
